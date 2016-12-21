@@ -29,7 +29,6 @@ type cache struct {
 	tables []table
 }
 
-
 func handleRequest(command string, c *cache, conn net.Conn) {
 	fmt.Println("handle request: " + command)
 
@@ -43,7 +42,7 @@ func handleRequest(command string, c *cache, conn net.Conn) {
 		os.Exit(0)
 
 		// TODO: patterns for queries
-	
+
 	default:
 		conn.Write([]byte(string("Your command didn't match the pattern\n")))
 	}
