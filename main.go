@@ -14,7 +14,7 @@ var (
 	gtm sync.Mutex
 )
 
-type TablesInMemory []*Table
+type Cache []*Table
 
 type Table struct {
 	name string
@@ -27,7 +27,7 @@ func NewTable(file_name string, data map[string]string) *Table {
 }
 
 func DecodeJSON(file_name string) *Table{
-	key_val, err := ioutil.ReadFile("data/" + file_name)
+	key_val, err := ioutil.ReadFile("db/" + file_name)
 	if err != nil {
 		return nil 
 	}
@@ -44,7 +44,7 @@ func EncodeJSON(tablechan <-chan Table) {
 	for {
 		table := <-tablechan
 		jsonData, _ := json.Marshal(table.data)
-		f, err := os.Create("data/" + table.name)
+		f, err := os.Create("db/" + table.name)
 	    checkErr(err)
 	    defer f.Close()
 	    _, err = f.Write(jsonData)
@@ -58,7 +58,7 @@ func checkErr(e error) {
 	}
 }
 
-func getTable(tables *TablesInMemory, name string) *Table {
+func getTable(tables *Cache, name string) *Table {
 	gtm.Lock()
 	for i := range *tables {
 		if (*tables)[i].name == name {
@@ -81,34 +81,7 @@ func exit(c net.Conn) {
 	c.Close()
 }
 
-func help(c net.Conn) {
-	c.Write([]byte(string("[table name] get [key]\n")))
-	c.Write([]byte(string("[table name] set [key] [value]\n")))
-	c.Write([]byte(string("[table name] del [key]\n")))
-	c.Write([]byte(string("[table name] keys\n")))
-	c.Write([]byte(string("exit\n")))
-}
-
-func getKeys(c net.Conn, tables *TablesInMemory, query_split []string) {
-	if len(query_split) == 2  {
-		table := getTable(tables, query_split[0])
-		if (table == nil) {
-			c.Write([]byte(string("Unknown table\n")))
-		} else {
-			table.m.RLock()
-			keys := make([]string, 0, len(table.data))
-		    for k := range table.data {
-		        keys = append(keys, k)
-		    }
-		    table.m.RUnlock()
-    		c.Write([]byte("[" + strings.Join(keys, ", ") + "]" + "\n"))
-		}
-	} else {
-		c.Write([]byte(string("Unknown command\n")))
-	}
-}
-
-func getVal(c net.Conn, tables *TablesInMemory, query_split []string) {
+func getVal(c net.Conn, tables *Cache, query_split []string) {
 	if len(query_split) == 3  {
 		table := getTable(tables, query_split[0])
 		if (table == nil) {
@@ -128,7 +101,7 @@ func getVal(c net.Conn, tables *TablesInMemory, query_split []string) {
 	}
 }
 
-func setVal(c net.Conn, tablechan chan<- Table, tables *TablesInMemory, query_split []string) {
+func setVal(c net.Conn, tablechan chan<- Table, tables *Cache, query_split []string) {
 	if len(query_split) >= 4 {
 		table := getTable(tables, query_split[0])
 		if (table == nil) {
@@ -144,7 +117,7 @@ func setVal(c net.Conn, tablechan chan<- Table, tables *TablesInMemory, query_sp
 	}
 }
 
-func delKey(c net.Conn, tablechan chan<- Table, tables *TablesInMemory, query_split []string) {
+func delKey(c net.Conn, tablechan chan<- Table, tables *Cache, query_split []string) {
 	if len(query_split) == 3  {
 		table := getTable(tables, query_split[0])
 		if (table == nil) {
@@ -168,7 +141,15 @@ func delKey(c net.Conn, tablechan chan<- Table, tables *TablesInMemory, query_sp
 	}
 }
 
-func handleRequest(c net.Conn, tablechan chan<- Table, tables *TablesInMemory, query string) {
+
+/*
+	Patterns for query
+	[table name] set [key] [value]
+	[table name] del [key]
+	[table name] keys
+	exit
+*/
+func handleRequest(c net.Conn, tablechan chan<- Table, tables *Cache, query string) {
 	query_split := strings.Fields(query)
 
 	if len(query_split) >= 2 {
@@ -179,8 +160,6 @@ func handleRequest(c net.Conn, tablechan chan<- Table, tables *TablesInMemory, q
 				getVal(c, tables, query_split)
 			case "del":
 				delKey(c, tablechan, tables, query_split)
-			case "keys":
-				getKeys(c, tables, query_split)
 			default:
 				c.Write([]byte(string("Unknown command\n")))
 		}
@@ -188,8 +167,6 @@ func handleRequest(c net.Conn, tablechan chan<- Table, tables *TablesInMemory, q
 		switch strings.ToLower(query_split[0]) {
 			case "exit":
 				exit(c)
-			case "help":
-				help(c)
 			default:
 				c.Write([]byte(string("Unknown command\n")))
 			}
@@ -198,7 +175,7 @@ func handleRequest(c net.Conn, tablechan chan<- Table, tables *TablesInMemory, q
 	}
 }
 
-func handleConnection(c net.Conn, tablechan chan<- Table, tables *TablesInMemory) {
+func handleConnection(c net.Conn, tablechan chan<- Table, tables *Cache) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := c.Read(buf)
@@ -211,13 +188,13 @@ func handleConnection(c net.Conn, tablechan chan<- Table, tables *TablesInMemory
 }
 
 func main() {
-	ln, err := net.Listen("tcp", ":2222")
+	ln, err := net.Listen("tcp", ":8888")
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
 	defer ln.Close()
-	var tables TablesInMemory
+	var tables Cache
 
 	tablechan := make(chan Table)
 	go EncodeJSON(tablechan)
