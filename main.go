@@ -1,13 +1,19 @@
 package main
 
 import (
-	"encoding/json"
+	"encoding/xml"
 	"io/ioutil"
 	"sync"
 	"fmt"
 	"net"
 	"os"
 	"strings"
+)
+
+const (
+	CONN_HOST = "localhost"
+	CONN_PORT = "8888"
+	CONN_TYPE = "tcp"
 )
 
 var (
@@ -17,39 +23,50 @@ var (
 type Cache []*Table
 
 type Table struct {
+	XMLName xml.Name `xml:"element"`
 	name string
-	data map[string]string
+	data []element `xml:"element"`
 	m sync.RWMutex
 }
 
-func NewTable(file_name string, data map[string]string) *Table {
-	return &Table{name: file_name, data: data,}
+type element struct {
+	XMLName xml.Name `xml:"element"`
+	Key     string   `xml:"key"`
+	Value   string   `xml:"value"`
 }
 
-func DecodeJSON(file_name string) *Table{
-	key_val, err := ioutil.ReadFile("db/" + file_name)
+func NewTable(file_name string) *Table {
+	return &Table{name: file_name, data:make([] element, 0)}
+}
+
+func parse_xml(file_name string) *Table {
+	data, err := ioutil.ReadFile("db/" + file_name)
+	if err != nil {
+		return nil
+	}
+
+	table := NewTable(file_name)
+
+	err = xml.Unmarshal(data, &table.data)
+	fmt.Println(err)
 	if err != nil {
 		return nil 
 	}
-	var f map[string]string
-    err = json.Unmarshal(key_val, &f)
-    if err != nil {
-		return nil 
-	}
-    t := NewTable(file_name, f)
-	return t
+	return table
 }
 
-func EncodeJSON(tablechan <-chan Table) {
+func save(tablechan <-chan Table){
 	for {
 		table := <-tablechan
-		jsonData, _ := json.Marshal(table.data)
+		data, _ := xml.Marshal(table.data)
+
 		f, err := os.Create("db/" + table.name)
 	    checkErr(err)
 	    defer f.Close()
-	    _, err = f.Write(jsonData)
+	    _, err = f.Write(data)
 	    checkErr(err)
 	}
+	
 }
 
 func checkErr(e error) {
@@ -67,7 +84,7 @@ func getTable(tables *Cache, name string) *Table {
 		}
 	}
 	
-	table := DecodeJSON(name)
+	table := parse_xml(name)
 
 	if table != nil {
 		*tables = append(*tables, table)
@@ -76,9 +93,46 @@ func getTable(tables *Cache, name string) *Table {
 	return table
 }
 
-func exit(c net.Conn) {
+func quit(c net.Conn) {
 	c.Write([]byte(string("Bye\n")))
 	c.Close()
+}
+
+func (table *Table) get_value(key string) string {
+	for _, element := range table.data {
+		if element.Key == key {
+			return element.Value
+		}
+	}
+	return ""
+}
+
+func (table *Table) set_value(key string, val string) {
+	for i, element := range table.data {
+		if element.Key == key {
+			element.Value = val
+			table.data[i] = element
+			return
+		}
+	}
+	element := element{XMLName: table.XMLName, Key: key, Value: val}
+	table.data = append(table.data, element)
+}
+
+// without saving order
+func remove_from_slice(s []element, i int) []element {
+	s[len(s)-1], s[i] = s[i], s[len(s)-1]
+	return s[:len(s)-1]
+}
+
+func (table *Table) del_key(key string) bool {
+	for i, element := range table.data {
+		if element.Key == key {
+			table.data = remove_from_slice(table.data, i)
+			return true
+		}
+	}
+	return false
 }
 
 func getVal(c net.Conn, tables *Cache, query_split []string) {
@@ -88,9 +142,9 @@ func getVal(c net.Conn, tables *Cache, query_split []string) {
 			c.Write([]byte(string("Unknown table\n")))
 		} else {
 			table.m.RLock()
-			value, ok := table.data[query_split[2]]
+			value := table.get_value(query_split[2])
 			table.m.RUnlock()
-			if ok {
+			if value != "" {
 				c.Write([]byte(string(value + "\n")))
 			} else {
 				c.Write([]byte(string("key does not exist\n")))
@@ -105,10 +159,10 @@ func setVal(c net.Conn, tablechan chan<- Table, tables *Cache, query_split []str
 	if len(query_split) >= 4 {
 		table := getTable(tables, query_split[0])
 		if (table == nil) {
-			table = NewTable(query_split[0], make(map[string]string))
+			table = &Table{name: query_split[0],data:make([] element, 0)}
 		} 
 		table.m.Lock()
-		table.data[query_split[2]] = strings.Join(query_split[3: ], " ")
+		table.set_value(query_split[2], query_split[3])
 		table.m.Unlock()
 		c.Write([]byte(string("OK\n")))
 		tablechan <- *table
@@ -124,12 +178,9 @@ func delKey(c net.Conn, tablechan chan<- Table, tables *Cache, query_split []str
 			c.Write([]byte(string("Unknown table\n")))
 		} else {
 			table.m.RLock()
-			_, ok := table.data[query_split[2]]
+			ok := table.del_key(query_split[2])
 			table.m.RUnlock()
 			if ok {
-				table.m.Lock()
-				delete(table.data, query_split[2])
-				table.m.Unlock()
 				c.Write([]byte(string("OK\n")))
 				tablechan <- *table
 			} else {
@@ -146,8 +197,7 @@ func delKey(c net.Conn, tablechan chan<- Table, tables *Cache, query_split []str
 	Patterns for query
 	[table name] set [key] [value]
 	[table name] del [key]
-	[table name] keys
-	exit
+	quit
 */
 func handleRequest(c net.Conn, tablechan chan<- Table, tables *Cache, query string) {
 	query_split := strings.Fields(query)
@@ -165,8 +215,8 @@ func handleRequest(c net.Conn, tablechan chan<- Table, tables *Cache, query stri
 		}
 	} else if len(query_split) == 1 {
 		switch strings.ToLower(query_split[0]) {
-			case "exit":
-				exit(c)
+			case "q":
+				quit(c)
 			default:
 				c.Write([]byte(string("Unknown command\n")))
 			}
@@ -188,7 +238,7 @@ func handleConnection(c net.Conn, tablechan chan<- Table, tables *Cache) {
 }
 
 func main() {
-	ln, err := net.Listen("tcp", ":8888")
+	ln, err := net.Listen(CONN_TYPE, CONN_HOST+":"+CONN_PORT)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -197,7 +247,7 @@ func main() {
 	var tables Cache
 
 	tablechan := make(chan Table)
-	go EncodeJSON(tablechan)
+	go save(tablechan) 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
